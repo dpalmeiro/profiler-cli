@@ -1,0 +1,26 @@
+{
+  "name": "profiler-cli",
+  "type": "module",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "bin": {
+    "profiler-cli": "./dist/index.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.45.3",
+    "yargs": "^17.7.1"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "tsc && node dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "22",
+    "@types/yargs": "^17.0.24",
+    "@typescript-eslint/eslint-plugin": "8",
+    "@typescript-eslint/parser": "8",
+    "eslint": "9",
+    "typescript": "5.7"
+  }
+}
