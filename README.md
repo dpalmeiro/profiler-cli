@@ -32,7 +32,7 @@ profiler-cli <profile-url> --calltree 10 --focus-function "FunctionName" --detai
 profiler-cli <profile-url> --flamegraph
 
 # Show flamegraph with limited depth
-profiler-cli <profile-url> --flamegraph --flamegraph-depth 5
+profiler-cli <profile-url> --flamegraph 5
 
 # Show flamegraph for specific function
 profiler-cli <profile-url> --flamegraph --focus-function "FunctionName"
@@ -59,8 +59,7 @@ profiler-cli <profile-url> --page-load
 - `--top-markers [N]`: Show top 5 markers by total duration and by max duration (default), or top N markers by frequency if N is specified
 - `--detailed`: Show detailed call paths for each function
 - `--max-paths N`: Maximum number of call paths to show in detailed mode (default: 5)
-- `--flamegraph`: Show flamegraph-style tree view of call stacks (top-down)
-- `--flamegraph-depth N`: Maximum depth for flamegraph tree (default: unlimited)
+- `--flamegraph [N]`: Show flamegraph-style tree view of call stacks (top-down), optionally limited to N levels deep
 - `--page-load`: Show page load performance summary with key metrics (Load event, First Contentful Paint, Largest Contentful Paint) and resource loading statistics
 
 **Note:** When using `--focus-marker` with values starting with `-` (like `-async,-sync`), use equals sign syntax: `--focus-marker="-async,-sync"`

@@ -39,12 +39,7 @@ const argv = (await yargsInstance
     default: 5,
   })
   .option("flamegraph", {
-    describe: "Show flamegraph-style tree view of call stacks",
-    type: "boolean",
-    default: false,
-  })
-  .option("flamegraph-depth", {
-    describe: "Maximum depth for flamegraph tree (default: unlimited)",
+    describe: "Show flamegraph-style tree view of call stacks (optional: max depth)",
     type: "number",
   })
   .option("page-load", {
@@ -85,15 +80,15 @@ profiler-cli <profile-url> --calltree 10
 
 ### 2. Flamegraph Tree View
 \`\`\`bash
-profiler-cli <profile-url> --flamegraph [--flamegraph-depth N]
+profiler-cli <profile-url> --flamegraph [N]
 \`\`\`
-Shows a top-down tree view of call stacks with visual hierarchy.
+Shows a top-down tree view of call stacks with visual hierarchy. Optionally limit depth to N levels.
 
 **Use when:** You want to see the call tree structure and understand caller-callee relationships.
 
 **Example:**
 \`\`\`bash
-profiler-cli <profile-url> --flamegraph --flamegraph-depth 5
+profiler-cli <profile-url> --flamegraph 5
 \`\`\`
 
 ### 3. Focus on Specific Function or Marker
@@ -241,13 +236,13 @@ profiler-cli <url> --page-load
 profiler-cli <url> --calltree 20
 
 # Focus on specific function
-profiler-cli <url> --flamegraph --focus-function "malloc" --flamegraph-depth 5
+profiler-cli <url> --flamegraph 5 --focus-function "malloc"
 \`\`\`
 
 ### Pattern 4: Understand Call Context
 \`\`\`bash
 # See call tree structure
-profiler-cli <url> --flamegraph --flamegraph-depth 10
+profiler-cli <url> --flamegraph 10
 
 # Or get detailed call paths
 profiler-cli <url> --calltree 5 --detailed --max-paths 5
@@ -295,14 +290,15 @@ if (argv.focusMarker === '' || (argv.focusMarker === undefined && argv._.length 
 }
 
 const hasTopMarkersFlag = process.argv.includes('--top-markers');
+const hasFlamegraphFlag = process.argv.includes('--flamegraph');
 
-if (!argv.calltree && !hasTopMarkersFlag && !argv.flamegraph && !argv.pageLoad && !argv.network) {
+if (!argv.calltree && !hasTopMarkersFlag && !hasFlamegraphFlag && !argv.pageLoad && !argv.network) {
   console.error("Please specify one of: --calltree <N>, --flamegraph, --top-markers [N], --page-load, or --network");
   console.error("Note: --focus-function can be used with --calltree or --flamegraph to filter results");
   process.exit(1);
 }
 
-const optionCount = [argv.calltree, hasTopMarkersFlag, argv.flamegraph, argv.pageLoad, argv.network].filter(x => x !== undefined && x !== false).length;
+const optionCount = [argv.calltree, hasTopMarkersFlag, hasFlamegraphFlag, argv.pageLoad, argv.network].filter(x => x !== undefined && x !== false).length;
 if (optionCount > 1) {
   console.error("Please specify only one of: --calltree, --flamegraph, --top-markers, --page-load, or --network");
   process.exit(1);
@@ -310,16 +306,17 @@ if (optionCount > 1) {
 
 const browser = await chromium.launch({ headless: true });
 
-function printFlameTree(node: FlameNode, indent: string = "", isLast: boolean = true, isRoot: boolean = true): void {
+function printFlameTree(node: FlameNode, totalSamples: number, indent: string = "", isLast: boolean = true, isRoot: boolean = true): void {
   const prefix = isRoot ? "" : (isLast ? "└─ " : "├─ ");
+  const percentage = ((node.totalTime / totalSamples) * 100).toFixed(1);
   const selfTimeStr = node.selfTime > 0 ? ` [self: ${node.selfTime}]` : "";
-  console.log(`${indent}${prefix}${node.name} (${node.totalTime} samples)${selfTimeStr}`);
+  console.log(`${indent}${prefix}${node.name} (${percentage}%, ${node.totalTime} samples)${selfTimeStr}`);
 
   const childIndent = isRoot ? "" : indent + (isLast ? "   " : "│  ");
 
   for (let i = 0; i < node.children.length; i++) {
     const isLastChild = i === node.children.length - 1;
-    printFlameTree(node.children[i], childIndent, isLastChild, false);
+    printFlameTree(node.children[i], totalSamples, childIndent, isLastChild, false);
   }
 }
 
@@ -366,8 +363,8 @@ try {
         console.log();
       }
     }
-  } else if (argv.flamegraph) {
-    const maxDepth = argv.flamegraphDepth || null;
+  } else if (hasFlamegraphFlag) {
+    const maxDepth = argv.flamegraph || null;
     const flamegraphData = await getFlamegraphData(
       browser,
       profileUrl,
@@ -387,8 +384,9 @@ try {
     if (flamegraphData.length === 0) {
       console.log("No data found in profile.\n");
     } else {
+      const totalSamples = flamegraphData.reduce((sum, root) => sum + root.totalTime, 0);
       for (const root of flamegraphData) {
-        printFlameTree(root);
+        printFlameTree(root, totalSamples);
         console.log();
       }
     }
