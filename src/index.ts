@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { hideBin } from "yargs/helpers";
 import yargs from "yargs/yargs";
-import { chromium } from "playwright";
-import { getCallTreeData, getMarkerSummary, getFlamegraphData, getPageLoadSummary, getNetworkResources } from "./profiler.js";
+import { chromium, firefox } from "playwright";
+import { getCallTreeData, getMarkerSummary, getFlamegraphData, getPageLoadSummary, getNetworkResources, annotateFunction } from "./profiler.js";
 import { FlameNode } from "./types.js";
+import { existsSync } from 'fs';
+import { spawn } from 'child_process';
 
 const yargsInstance = yargs(hideBin(process.argv));
 const argv = (await yargsInstance
@@ -55,6 +57,11 @@ const argv = (await yargsInstance
   .option("ai", {
     describe: "Show AI-focused documentation",
     type: "boolean",
+  })
+  .option("annotate", {
+    describe: "Annotate function with assembly (asm), source (src), or both (all). Requires function name as positional argument.",
+    type: "string",
+    choices: ["asm", "src", "all"],
   })
   .help().argv) as any;
 
@@ -292,19 +299,117 @@ if (argv.focusMarker === '' || (argv.focusMarker === undefined && argv._.length 
 const hasTopMarkersFlag = process.argv.includes('--top-markers');
 const hasFlamegraphFlag = process.argv.includes('--flamegraph');
 
-if (!argv.calltree && !hasTopMarkersFlag && !hasFlamegraphFlag && !argv.pageLoad && !argv.network) {
-  console.error("Please specify one of: --calltree <N>, --flamegraph, --top-markers [N], --page-load, or --network");
+if (!argv.calltree && !hasTopMarkersFlag && !hasFlamegraphFlag && !argv.pageLoad && !argv.network && !argv.annotate) {
+  console.error("Please specify one of: --calltree <N>, --flamegraph, --top-markers [N], --page-load, --network, or --annotate <asm|src|all> <function-name>");
   console.error("Note: --focus-function can be used with --calltree or --flamegraph to filter results");
   process.exit(1);
 }
 
-const optionCount = [argv.calltree, hasTopMarkersFlag, hasFlamegraphFlag, argv.pageLoad, argv.network].filter(x => x !== undefined && x !== false).length;
+const optionCount = [argv.calltree, hasTopMarkersFlag, hasFlamegraphFlag, argv.pageLoad, argv.network, argv.annotate].filter(x => x !== undefined && x !== false).length;
 if (optionCount > 1) {
-  console.error("Please specify only one of: --calltree, --flamegraph, --top-markers, --page-load, or --network");
+  console.error("Please specify only one of: --calltree, --flamegraph, --top-markers, --page-load, --network, or --annotate");
   process.exit(1);
 }
 
-const browser = await chromium.launch({ headless: true });
+// Validate that --annotate has a function name argument
+if (argv.annotate && !argv._[1]) {
+  console.error("--annotate requires a function name as argument");
+  console.error("Example: profiler-cli profile.json --annotate=asm \"FunctionName\"");
+  process.exit(1);
+}
+
+// Check if this is a local profile file (.json.gz), and if so start samply
+let samplyProcess: any = null;
+let actualProfileUrl = profileUrl;
+
+if (existsSync(profileUrl) && profileUrl.endsWith('.json.gz')) {
+  console.log("Local profile detected, starting samply server...\n");
+
+  const PORT = 3000 + Math.floor(Math.random() * 1000);
+  console.log(`Starting samply server on port ${PORT}...`);
+
+  // Start samply from the directory containing the profile
+  // This is important for jitdump files referenced with relative paths (./jit-*.dump)
+  const path = await import('path');
+  const profileDir = path.dirname(path.resolve(profileUrl));
+  const profileBasename = path.basename(profileUrl);
+
+  console.log(`Starting samply from directory: ${profileDir}`);
+  console.log(`Loading profile: ${profileBasename}`);
+
+  samplyProcess = spawn("samply", ["load", profileBasename, "--no-open", "--port", String(PORT)], {
+    cwd: profileDir,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  // Wait for samply to be ready and capture the profiler URL
+  await new Promise<void>((resolve, reject) => {
+    let samplyOutput = "";
+    const timeout = setTimeout(() => {
+      reject(new Error(`Samply did not start within 30 seconds`));
+    }, 30000);
+
+    samplyProcess.stdout?.on("data", (data: Buffer) => {
+      const output = data.toString();
+      samplyOutput += output;
+
+      // Try to extract the profiler URL from samply's output
+      const urlMatch = output.match(/https:\/\/profiler\.firefox\.com\/[^\s]+/);
+      if (urlMatch) {
+        actualProfileUrl = urlMatch[0];
+      }
+    });
+
+    samplyProcess.stderr?.on("data", (data: Buffer) => {
+      const output = data.toString();
+      samplyOutput += output;
+
+      // samply prints the URL to stderr
+      const urlMatch = output.match(/https:\/\/profiler\.firefox\.com\/[^\s]+/);
+      if (urlMatch) {
+        actualProfileUrl = urlMatch[0];
+      }
+
+      if (output.includes("Local server listening")) {
+        // Wait a bit more to make sure we capture the URL
+        setTimeout(() => {
+          clearTimeout(timeout);
+          resolve();
+        }, 500);
+      }
+    });
+
+    samplyProcess.on("error", (err: Error) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+
+  console.log("Samply server ready");
+
+  // If we didn't capture the URL from samply's output, construct it
+  if (actualProfileUrl === profileUrl) {
+    console.log("Profiler URL not captured from samply output, fetching from server...");
+    try {
+      const response = await fetch(`http://127.0.0.1:${PORT}/`);
+      const html = await response.text();
+      const urlMatch = html.match(/https:\/\/profiler\.firefox\.com\/[^"]+/);
+      if (urlMatch) {
+        actualProfileUrl = urlMatch[0];
+        console.log("Got profiler URL from HTTP response");
+      } else {
+        console.error("Could not find profiler URL in samply server response");
+      }
+    } catch (error) {
+      console.error(`Error fetching profiler URL: ${error}`);
+    }
+  }
+
+  console.log(`Profiler URL: ${actualProfileUrl}\n`);
+}
+
+// Use Firefox for better profiler compatibility
+const browser = await firefox.launch({ headless: true });
 
 function printFlameTree(node: FlameNode, totalSamples: number, indent: string = "", isLast: boolean = true, isRoot: boolean = true): void {
   const prefix = isRoot ? "" : (isLast ? "└─ " : "├─ ");
@@ -322,7 +427,7 @@ function printFlameTree(node: FlameNode, totalSamples: number, indent: string = 
 
 try {
   if (hasTopMarkersFlag) {
-    const allMarkerSummaries = await getMarkerSummary(browser, profileUrl);
+    const allMarkerSummaries = await getMarkerSummary(browser, actualProfileUrl);
 
     console.log(`\nTotal unique markers: ${allMarkerSummaries.length}\n`);
 
@@ -367,7 +472,7 @@ try {
     const maxDepth = argv.flamegraph || null;
     const flamegraphData = await getFlamegraphData(
       browser,
-      profileUrl,
+      actualProfileUrl,
       maxDepth,
       argv.focusFunction || null,
       argv.focusMarker || null
@@ -393,7 +498,7 @@ try {
   } else if (argv.calltree) {
     const callTreeData = await getCallTreeData(
       browser,
-      profileUrl,
+      actualProfileUrl,
       argv.calltree || 1,
       argv.detailed,
       argv.focusFunction || null,
@@ -446,7 +551,7 @@ try {
       }
     }
   } else if (argv.pageLoad) {
-    const pageLoadSummary = await getPageLoadSummary(browser, profileUrl);
+    const pageLoadSummary = await getPageLoadSummary(browser, actualProfileUrl);
 
     console.log("\n═══════════════════════════════════════════════════════════════════════════════");
     console.log("  Page Load Summary");
@@ -578,7 +683,7 @@ try {
       }
     }
   } else if (argv.network) {
-    const networkSummary = await getNetworkResources(browser, profileUrl);
+    const networkSummary = await getNetworkResources(browser, actualProfileUrl);
 
     console.log("\n═══════════════════════════════════════════════════════════════════════════════");
     console.log("  Network Resources");
@@ -634,7 +739,13 @@ try {
 
       console.log();
     }
+  } else if (argv.annotate) {
+    const functionName = argv._[1] as string;
+    await annotateFunction(browser, actualProfileUrl, functionName, argv.annotate as 'asm' | 'src' | 'all');
   }
 } finally {
   await browser.close();
+  if (samplyProcess) {
+    samplyProcess.kill();
+  }
 }

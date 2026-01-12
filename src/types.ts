@@ -87,3 +87,44 @@ export interface PageLoadSummary {
   sampleCategories: SampleCategoryStats | null;
   jankPeriods: JankPeriod[] | null;
 }
+
+export interface AssemblyInstruction {
+  address: string;
+  instruction: string;
+  samples: number;
+  sourceLine?: string;
+  sourceFile?: string;
+  sourceLineNumber?: number;
+  irLineNumber?: number;
+  jsSourceLineNumber?: number;
+  sourceCode?: string;
+  ionOperands?: string | null;
+  bytecodeLocation?: any;
+}
+
+export interface AssemblyData {
+  functionName: string;
+  selfTime: number;
+  totalTime: number;
+  instructions: AssemblyInstruction[];
+}
+
+export interface AssemblyContext {
+  callStack: string[];
+  instructions: AssemblyInstruction[];
+  totalSamples: number;
+  nativeSymbols: number[];
+}
+
+export interface SourceLine {
+  lineNumber: number;
+  text: string;
+  selfSamples: number;
+  totalSamples: number;
+}
+
+export interface SourceCodeData {
+  fileName: string;
+  lines: SourceLine[];
+  totalSamples: number;
+}
