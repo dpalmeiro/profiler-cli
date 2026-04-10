@@ -69,6 +69,10 @@ export function buildParser(args: string[]) {
       describe: "Collapse a function and its subtree into a single node",
       type: "string",
     })
+    .option("log-markers", {
+      describe: "Show Log-type markers (from about:logging captures) with their text payload. Optionally filter by keyword",
+      type: "string",
+    })
     .option("samply-path", {
       describe: "Path to samply binary (default: use samply from PATH)",
       type: "string",
@@ -92,6 +96,7 @@ export type ParsedArgs = {
   annotate?: string;
   color: boolean;
   collapseFunction?: string;
+  logMarkers?: string;
   samplyPath?: string;
 };
 
@@ -106,14 +111,15 @@ export function validateArgs(argv: ParsedArgs, rawArgs: string[]): string | null
 
   const hasTopMarkersFlag = rawArgs.includes('--top-markers');
   const hasFlamegraphFlag = rawArgs.includes('--flamegraph');
+  const hasLogMarkersFlag = rawArgs.includes('--log-markers');
 
-  if (!argv.calltree && !hasTopMarkersFlag && !hasFlamegraphFlag && !argv.pageLoad && !argv.network && !argv.annotate) {
-    return "Please specify one of: --calltree <N>, --flamegraph, --top-markers [N], --page-load, --network, or --annotate <asm|src|all> <function-name>";
+  if (!argv.calltree && !hasTopMarkersFlag && !hasFlamegraphFlag && !argv.pageLoad && !argv.network && !argv.annotate && !hasLogMarkersFlag) {
+    return "Please specify one of: --calltree <N>, --flamegraph, --top-markers [N], --page-load, --network, --log-markers [filter], or --annotate <asm|src|all> <function-name>";
   }
 
-  const optionCount = [argv.calltree, hasTopMarkersFlag, hasFlamegraphFlag, argv.pageLoad, argv.network, argv.annotate].filter(x => x !== undefined && x !== false).length;
+  const optionCount = [argv.calltree, hasTopMarkersFlag, hasFlamegraphFlag, argv.pageLoad, argv.network, argv.annotate, hasLogMarkersFlag].filter(x => x !== undefined && x !== false).length;
   if (optionCount > 1) {
-    return "Please specify only one of: --calltree, --flamegraph, --top-markers, --page-load, --network, or --annotate";
+    return "Please specify only one of: --calltree, --flamegraph, --top-markers, --page-load, --network, --log-markers, or --annotate";
   }
 
   if (argv.annotate && !argv._[1]) {

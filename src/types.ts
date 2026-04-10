@@ -88,6 +88,13 @@ export interface PageLoadSummary {
   jankPeriods: JankPeriod[] | null;
 }
 
+export interface LogMarkerEntry {
+  thread: string;
+  time: number;
+  module: string;
+  message: string;
+}
+
 export interface AssemblyInstruction {
   address: string;
   instruction: string;

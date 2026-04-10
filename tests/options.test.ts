@@ -162,6 +162,18 @@ describe("buildParser", () => {
       expect(argv.topMarkers).toBe(10);
     });
   });
+
+  describe("--log-markers", () => {
+    it("parses filter string with camelCase key", async () => {
+      const argv = await parse([URL, "--log-markers", "MDSM"]);
+      expect(argv.logMarkers).toBe("MDSM");
+    });
+
+    it("is undefined when not provided", async () => {
+      const argv = await parse([URL, "--calltree", "5"]);
+      expect(argv.logMarkers).toBeUndefined();
+    });
+  });
 });
 
 describe("validateArgs", () => {
@@ -200,6 +212,22 @@ describe("validateArgs", () => {
   it("returns null for valid --top-markers args", () => {
     const argv = makeArgv();
     expect(validateArgs(argv, ["--top-markers"])).toBeNull();
+  });
+
+  it("returns null for valid --log-markers args", () => {
+    const argv = makeArgv({ logMarkers: "" });
+    expect(validateArgs(argv, ["--log-markers"])).toBeNull();
+  });
+
+  it("returns null for --log-markers with a filter", () => {
+    const argv = makeArgv({ logMarkers: "MDSM" });
+    expect(validateArgs(argv, ["--log-markers", "MDSM"])).toBeNull();
+  });
+
+  it("rejects --log-markers combined with --calltree", () => {
+    const argv = makeArgv({ calltree: 10, logMarkers: "" });
+    const error = validateArgs(argv, ["--calltree", "10", "--log-markers"]);
+    expect(error).toMatch("only one");
   });
 
   it("requires a profile URL", () => {

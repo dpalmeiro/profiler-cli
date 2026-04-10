@@ -1,5 +1,5 @@
 import { Browser } from "playwright";
-import { CallTreeNode, MarkerSummary, FlameNode, PageLoadSummary, NetworkResourceSummary } from "./types.js";
+import { CallTreeNode, MarkerSummary, LogMarkerEntry, FlameNode, PageLoadSummary, NetworkResourceSummary } from "./types.js";
 import { parseProfileFile } from "./profile-parser.js";
 
 declare const window: any;
@@ -497,6 +497,72 @@ export async function getMarkerSummary(
 
   const result = JSON.parse(jsonString);
   return result.summaries;
+}
+
+export async function getLogMarkers(
+  browser: Browser,
+  url: string,
+  filter: string | null = null
+): Promise<LogMarkerEntry[]> {
+  const page = await browser.newPage({
+    bypassCSP: true,
+  });
+
+  page.setDefaultTimeout(0);
+
+  await page.goto(url);
+
+  await page.waitForFunction(() => {
+    return (
+      window.selectors &&
+      selectors.app.getView(getState()).phase == "DATA_LOADED"
+    );
+  });
+
+  await page.waitForFunction(() => {
+    return selectors.profile.getSymbolicationStatus(getState()) == "DONE";
+  });
+
+  const jsonString = await page.evaluate((filter: string | null) => {
+    const profile = selectors.profile.getProfile(getState());
+    const results: Array<{ thread: string; time: number; module: string; message: string }> = [];
+
+    for (const thread of profile.threads) {
+      const { name, markers } = thread;
+      if (!markers) continue;
+
+      const { startTime, data: markerData, length: markerLength } = markers;
+
+      for (let i = 0; i < markerLength; i++) {
+        const mData = markerData[i];
+        if (!mData || mData.type !== "Log") continue;
+
+        // data.name for Log markers is always a plain string in the profiler store
+        const message = String(mData.name ?? "");
+        const module = String(mData.module ?? "");
+
+        if (filter !== null && filter !== "") {
+          const lf = filter.toLowerCase();
+          if (!message.toLowerCase().includes(lf) && !module.toLowerCase().includes(lf) && !name.toLowerCase().includes(lf)) {
+            continue;
+          }
+        }
+
+        results.push({ thread: name, time: startTime[i] ?? 0, module, message });
+      }
+    }
+
+    results.sort((a, b) => a.time - b.time);
+    return JSON.stringify(results);
+  }, filter);
+
+  await page.close();
+
+  if (typeof jsonString !== "string") {
+    throw new Error("Did not get back a string");
+  }
+
+  return JSON.parse(jsonString);
 }
 
 export async function getFlamegraphData(

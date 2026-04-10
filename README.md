@@ -89,12 +89,46 @@ profiler-cli <profile> --flamegraph 5
 ```
 
 ### `--top-markers [N]`
-Show the top 5 markers by total duration and by max single-instance duration. If N is specified, shows the top N markers.
+Show the top 5 markers by total duration and by max single-instance duration. If N is specified, shows the top N markers by frequency.
+
+Only counts markers that have a non-zero duration. Zero-duration log markers are not included — use `--log-markers` for those.
 
 ```bash
 profiler-cli <profile> --top-markers
 profiler-cli <profile> --top-markers 20
 ```
+
+### `--log-markers [FILTER]`
+Extract the text content of `Log`-type markers emitted by Firefox's `about:logging` media preset. These are instant, zero-duration markers that carry a module name and a log message as their payload — invisible to `--top-markers` and `--focus-marker`.
+
+Output is grouped by thread and sorted chronologically. An optional filter string restricts results to entries where the message, module name, or thread name contains the filter (case-insensitive).
+
+```bash
+# Show all log markers across all threads
+profiler-cli <profile> --log-markers
+
+# Filter by thread name
+profiler-cli <profile> --log-markers "MediaDecoderStateMachine"
+
+# Filter by message content
+profiler-cli <profile> --log-markers "blank media"
+
+# Filter by module name
+profiler-cli <profile> --log-markers "D/MediaDecoder"
+```
+
+Example output:
+```
+Log markers (filter: "MediaDecoder"): 14089 total
+
+[MediaDecoderStateMachine #3]
+  t=100.00ms  [D/MediaDecoder] StateChange DECODING
+  t=200.00ms  [D/MediaDecoder] StartBuffering reason=NotEnoughData
+```
+
+**When to use `--log-markers` vs `--focus-marker`:**
+- `--focus-marker` is a *sample filter* — it restricts which CPU samples appear in a `--calltree` or `--flamegraph`, using named markers as time windows. Use it to answer "what code was running during X?"
+- `--log-markers` is a *log reader* — it extracts the text payload of `about:logging` entries. Use it to answer "what did the media pipeline log?" No call tree involved.
 
 ### `--page-load`
 Show a page load performance summary including navigation timing (FCP, Load), resource loading statistics, CPU category breakdown, and jank period analysis.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { hideBin } from "yargs/helpers";
 import { chromium, firefox } from "playwright";
-import { getCallTreeData, getMarkerSummary, getFlamegraphData, getPageLoadSummary, getNetworkResources, annotateFunction } from "./profiler.js";
+import { getCallTreeData, getMarkerSummary, getLogMarkers, getFlamegraphData, getPageLoadSummary, getNetworkResources, annotateFunction } from "./profiler.js";
 import { FlameNode } from "./types.js";
 import { existsSync } from 'fs';
 import { spawn } from 'child_process';
@@ -353,6 +353,7 @@ if (validationError) {
 const profileUrl = argv._[0] as string;
 const hasTopMarkersFlag = process.argv.includes('--top-markers');
 const hasFlamegraphFlag = process.argv.includes('--flamegraph');
+const hasLogMarkersFlag = process.argv.includes('--log-markers');
 
 // Check if this is a local profile file (.json.gz), and if so start samply
 let samplyProcess: any = null;
@@ -507,6 +508,28 @@ try {
         console.log(`   Min duration: ${marker.minDuration.toFixed(2)} ms`);
         console.log(`   Max duration: ${marker.maxDuration.toFixed(2)} ms`);
         console.log();
+      }
+    }
+  } else if (hasLogMarkersFlag) {
+    const filter = (argv.logMarkers && argv.logMarkers !== "") ? argv.logMarkers : null;
+    const entries = await getLogMarkers(browser, actualProfileUrl, filter);
+
+    if (entries.length === 0) {
+      console.log(filter
+        ? `No Log markers found matching "${filter}".`
+        : "No Log markers found in this profile.");
+    } else {
+      const filterLabel = filter ? ` (filter: "${filter}")` : "";
+      console.log(`\nLog markers${filterLabel}: ${entries.length} total\n`);
+
+      let currentThread = "";
+      for (const entry of entries) {
+        if (entry.thread !== currentThread) {
+          currentThread = entry.thread;
+          console.log(`\n[${currentThread}]`);
+        }
+        const moduleLabel = entry.module ? `[${entry.module}] ` : "";
+        console.log(`  t=${entry.time.toFixed(2)}ms  ${moduleLabel}${entry.message}`);
       }
     }
   } else if (hasFlamegraphFlag) {
