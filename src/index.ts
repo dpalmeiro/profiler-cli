@@ -3,8 +3,9 @@ import { hideBin } from "yargs/helpers";
 import { chromium, firefox } from "playwright";
 import { getCallTreeData, getMarkerSummary, getLogMarkers, getFlamegraphData, getPageLoadSummary, getNetworkResources, annotateFunction } from "./profiler.js";
 import { FlameNode } from "./types.js";
-import { existsSync } from 'fs';
+import { existsSync, readdirSync } from 'fs';
 import { spawn } from 'child_process';
+import path from 'path';
 import { buildParser, validateArgs, ParsedArgs } from "./options.js";
 
 const argv = (await buildParser(hideBin(process.argv)).argv) as ParsedArgs;
@@ -365,13 +366,28 @@ if (existsSync(profileUrl) && profileUrl.endsWith('.json.gz')) {
   const PORT = 3000 + Math.floor(Math.random() * 1000);
   console.log(`Starting samply server on port ${PORT}...`);
 
-  // Start samply from the directory containing the profile
-  // This is important for jitdump files referenced with relative paths (./jit-*.dump)
-  const path = await import('path');
   const profileDir = path.dirname(path.resolve(profileUrl));
+  const profileAbsPath = path.resolve(profileUrl);
   const profileBasename = path.basename(profileUrl);
 
-  console.log(`Starting samply from directory: ${profileDir}`);
+  // Determine where to start samply from. Jitdump files (jit-*.dump) must be in the CWD.
+  // They may be in a subdirectory (e.g. a spew dir like "tmp/").
+  let samplyCwd = profileDir;
+  const hasDumpsIn = (dir: string) => {
+    try { return readdirSync(dir).some(f => f.endsWith('.dump')); } catch { return false; }
+  };
+  if (!hasDumpsIn(profileDir)) {
+    try {
+      const subdir = readdirSync(profileDir).find(
+        f => { try { return readdirSync(path.join(profileDir, f)).some(n => n.endsWith('.dump')); } catch { return false; } }
+      );
+      if (subdir) {
+        samplyCwd = path.join(profileDir, subdir);
+      }
+    } catch {}
+  }
+
+  console.log(`Starting samply from directory: ${samplyCwd}`);
   console.log(`Loading profile: ${profileBasename}`);
 
   const samplyBinary = argv.samplyPath || "samply";
@@ -379,8 +395,8 @@ if (existsSync(profileUrl) && profileUrl.endsWith('.json.gz')) {
     console.log(`Using samply: ${argv.samplyPath}`);
   }
 
-  samplyProcess = spawn(samplyBinary, ["load", profileBasename, "--no-open", "--port", String(PORT)], {
-    cwd: profileDir,
+  samplyProcess = spawn(samplyBinary, ["load", profileAbsPath, "--no-open", "--port", String(PORT)], {
+    cwd: samplyCwd,
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -813,11 +829,14 @@ try {
     }
   } else if (argv.annotate) {
     const functionName = argv._[1] as string;
-    await annotateFunction(browser, actualProfileUrl, functionName, argv.annotate as 'asm' | 'src' | 'all', argv.color);
+    const annotateProfileDir = existsSync(profileUrl) ? path.dirname(path.resolve(profileUrl)) : process.cwd();
+    await annotateFunction(browser, actualProfileUrl, functionName, argv.annotate as 'asm' | 'src' | 'all', argv.color, annotateProfileDir);
   }
 } finally {
   await browser.close();
   if (samplyProcess) {
     samplyProcess.kill();
+    samplyProcess.stdout?.destroy();
+    samplyProcess.stderr?.destroy();
   }
 }

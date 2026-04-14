@@ -1,6 +1,8 @@
 import { Browser } from "playwright";
 import { CallTreeNode, MarkerSummary, LogMarkerEntry, FlameNode, PageLoadSummary, NetworkResourceSummary } from "./types.js";
 import { parseProfileFile } from "./profile-parser.js";
+import { existsSync, readFileSync } from "fs";
+import path from "path";
 
 declare const window: any;
 declare const selectors: any;
@@ -1301,13 +1303,14 @@ async function fetchAssemblyFromSamply(page: any, nativeSym: any): Promise<any> 
   });
 
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
     const response = await fetch(asmUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: asmBody
-    });
-
-    console.log(`Samply /asm/v1 response status: ${response.status}`);
+      body: asmBody,
+      signal: controller.signal
+    }).finally(() => clearTimeout(timeoutId));
 
     if (response.ok) {
       const responseText = await response.text();
@@ -1316,13 +1319,13 @@ async function fetchAssemblyFromSamply(page: any, nativeSym: any): Promise<any> 
       try {
         asmData = JSON.parse(responseText);
       } catch (e) {
-        console.log("Response is not JSON");
         return null;
       }
 
-      console.log(`Response type: ${typeof asmData}, constructor: ${asmData?.constructor?.name}`);
-      console.log(`First char of response: ${responseText.substring(0, 1)}`);
-      console.log(`First 100 chars: ${responseText.substring(0, 100)}`);
+      if (typeof asmData === 'string') {
+        console.log(`Samply error: ${asmData}`);
+        return null;
+      }
 
       // The response should be an object with {startAddress, instructions, ...}
       if (asmData && typeof asmData === 'object' && asmData.startAddress && asmData.instructions) {
@@ -1373,7 +1376,8 @@ export async function annotateFunction(
   url: string,
   functionName: string,
   mode: 'asm' | 'src' | 'all',
-  enableColor: boolean = false
+  enableColor: boolean = false,
+  profileDir: string = process.cwd()
 ): Promise<void> {
   const page = await browser.newPage({
     bypassCSP: true,
@@ -1564,7 +1568,6 @@ export async function annotateFunction(
         // Dispatch UPDATE_BOTTOM_BOX to load this native symbol's assembly
         await page.evaluate(({ nativeSym }: any) => {
           const state = window.getState();
-          const threadsKey = window.selectors.urlState.getSelectedThreadsKey(state);
           const currentTab = window.selectors.urlState.getSelectedTab(state);
 
           window.dispatch(window.actions.updateBottomBoxContentsAndMaybeOpen(currentTab, {
@@ -1677,20 +1680,19 @@ export async function annotateFunction(
         }, { nativeSym, nativeSymbolIndex });
 
         if ((assemblyData as any).error) {
-          console.log(`Error: ${(assemblyData as any).error}`);
-
-          // Check if this is a V8/malformed response error - try fetching directly from samply
+          // assemblyViewCode is null when the profiler's React component never initiated the fetch,
+          // which happens for JIT functions. Also covers BROWSER_CONNECTION_ERROR / MALFORMED_RESPONSE.
           const errorStr = JSON.stringify((assemblyData as any).assemblyViewCode || '');
-          if (errorStr.includes('SYMBOL_SERVER_API_MALFORMED_RESPONSE') || errorStr.includes('BROWSER_CONNECTION_ERROR')) {
-            console.log("Profiler UI failed, fetching assembly directly from samply...\n");
-
+          const assemblyNeverLoaded = (assemblyData as any).assemblyViewCode === null;
+          if (assemblyNeverLoaded || errorStr.includes('SYMBOL_SERVER_API_MALFORMED_RESPONSE') || errorStr.includes('BROWSER_CONNECTION_ERROR')) {
             // Fetch assembly directly from samply
             const samplyAsm = await fetchAssemblyFromSamply(page, nativeSym);
 
-            console.log(`Samply fetch result: ${samplyAsm ? 'success' : 'failed'}`);
+            if (!samplyAsm) {
+              console.log(`Error: ${(assemblyData as any).error}`);
+            }
 
             if (samplyAsm && samplyAsm.instructions) {
-              console.log(`Got ${samplyAsm.instructions.length} instructions from samply`);
 
               // Compute sample counts and line mappings manually from frame table
               const sampleCounts = await page.evaluate(({ nativeSymbolIndex, instructions }: any) => {
@@ -1767,8 +1769,6 @@ export async function annotateFunction(
                 // For mode=all, store for interleaving
                 group.assemblyInstructions = instructionsWithSamples;
                 group.assemblyTotalSamples = totalSampleCount;
-                console.log(`Stored ${instructionsWithSamples.length} instructions for interleaving`);
-                console.log(`${instructionsWithSamples.filter((i: any) => i.sourceLineNumber !== null).length} instructions have source line mappings\n`);
               }
             }
           }
@@ -1843,7 +1843,6 @@ export async function annotateFunction(
       { functionName }
     );
 
-    console.log(`Function source info: ${JSON.stringify(funcSourceInfo)}`);
 
     // For functions without source index, try triggering source load via native symbol
     if (((funcSourceInfo as any).error || (funcSourceInfo as any).sourceIndex === null) &&
@@ -2422,28 +2421,6 @@ export async function annotateFunction(
       }
     } else {
       const sourceIndex = (funcSourceInfo as any).sourceIndex;
-      console.log(`Function source index: ${sourceIndex}`);
-
-      // Check what this source index points to
-      const sourceInfo = await page.evaluate(({ sourceIndex }: any) => {
-        const state = window.getState();
-        const profile = window.selectors.profile.getProfile(state);
-
-        if (profile.sourceTable && sourceIndex < profile.sourceTable.length) {
-          const fileName = profile.sourceTable.fileName ? profile.sourceTable.fileName[sourceIndex] : null;
-          const category = profile.sourceTable.category ? profile.sourceTable.category[sourceIndex] : null;
-
-          return {
-            sourceIndex,
-            fileName: fileName !== null ? profile.stringTable.getString(fileName) : null,
-            category
-          };
-        }
-
-        return { sourceIndex, fileName: null, category: null };
-      }, { sourceIndex });
-
-      console.log(`Source info: ${JSON.stringify(sourceInfo)}`);
 
       // Dispatch to load this source
       await page.evaluate(({ sourceIndex }: any) => {
@@ -2912,7 +2889,265 @@ export async function annotateFunction(
           return;
         }
       } else {
-        console.log(`Source did not load: ${JSON.stringify(sourceData)}\n`);
+        // Profiler failed to load source — try reading the file from disk
+        const fileMatch = functionName.match(/\(([^)]+\.js):\d+:\d+\)$/) ||
+                          functionName.match(/([^\s(]+\.js):\d+:\d+$/);
+        const jsFileName = fileMatch ? path.basename(fileMatch[1]) : null;
+
+        let localFilePath: string | null = null;
+        if (jsFileName) {
+          const candidates = [
+            path.join(profileDir, jsFileName),
+            path.join(profileDir, '..', jsFileName),
+            path.join(process.cwd(), jsFileName),
+          ];
+          localFilePath = candidates.find(p => existsSync(p)) || null;
+        }
+
+        if (localFilePath) {
+          const fileContent = readFileSync(localFilePath, 'utf8');
+          const fileLines = fileContent.split('\n');
+
+          // Get line hit counts from the browser
+          const lineCounts = await page.evaluate(({ nativeSymbolIndices }: any) => {
+            const state = window.getState();
+            const thread = window.selectors.selectedThread.getThread(state);
+            const { samples, stackTable, frameTable } = thread;
+
+            const lineSelfHits = new Map<number, number>();
+            const lineTotalHits = new Map<number, number>();
+            const nativeSymbolSet = new Set(nativeSymbolIndices);
+            let totalFunctionSelfSamples = 0;
+
+            for (let sampleIdx = 0; sampleIdx < samples.length; sampleIdx++) {
+              let stackIdx = samples.stack[sampleIdx];
+              if (stackIdx === null) continue;
+
+              const leafFrameIdx = stackTable.frame[stackIdx];
+              const leafNativeSymbol = frameTable.nativeSymbol ? frameTable.nativeSymbol[leafFrameIdx] : null;
+              const isLeafInFunction = leafNativeSymbol !== null && nativeSymbolSet.has(leafNativeSymbol);
+
+              if (isLeafInFunction) {
+                totalFunctionSelfSamples++;
+                const leafLineNumber = frameTable.line ? frameTable.line[leafFrameIdx] : null;
+                if (leafLineNumber !== null) {
+                  lineSelfHits.set(leafLineNumber, (lineSelfHits.get(leafLineNumber) || 0) + 1);
+                }
+              }
+
+              while (stackIdx !== null) {
+                const frameIdx = stackTable.frame[stackIdx];
+                const nativeSymbol = frameTable.nativeSymbol ? frameTable.nativeSymbol[frameIdx] : null;
+                if (nativeSymbol !== null && nativeSymbolSet.has(nativeSymbol)) {
+                  const lineNumber = frameTable.line ? frameTable.line[frameIdx] : null;
+                  if (lineNumber !== null) {
+                    lineTotalHits.set(lineNumber, (lineTotalHits.get(lineNumber) || 0) + 1);
+                  }
+                }
+                stackIdx = stackTable.prefix[stackIdx];
+              }
+            }
+
+            return {
+              selfHits: Object.fromEntries(lineSelfHits),
+              totalHits: Object.fromEntries(lineTotalHits),
+              totalFunctionSelfSamples,
+            };
+          }, { nativeSymbolIndices });
+
+          const { selfHits, totalHits, totalFunctionSelfSamples } = lineCounts as any;
+
+          const lineMatch = functionName.match(/:(\d+):\d+\)?$/);
+          const functionStartLine = lineMatch ? parseInt(lineMatch[1]) : null;
+
+          const lines = fileLines.map((text, idx) => ({
+            lineNumber: idx + 1,
+            text,
+            selfSamples: selfHits[idx + 1] || 0,
+            totalSamples: totalHits[idx + 1] || 0,
+          }));
+
+          let relevantLines = lines;
+          let functionEndLine = lines.length;
+
+          if (functionStartLine !== null) {
+            const startLine = lines.find(l => l.lineNumber === functionStartLine);
+            if (startLine) {
+              const startIndent = startLine.text.search(/\S/);
+              for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (line.lineNumber > functionStartLine) {
+                  const lineIndent = line.text.search(/\S/);
+                  if (line.text.trim() === '}' && lineIndent <= startIndent) {
+                    functionEndLine = line.lineNumber;
+                    break;
+                  }
+                }
+              }
+              relevantLines = lines.filter(l => l.lineNumber >= functionStartLine && l.lineNumber <= functionEndLine);
+            }
+          }
+
+          console.log(`Source file: ${localFilePath}`);
+          console.log();
+
+          const maxSourceSamples = Math.max(...relevantLines.map(l => l.selfSamples), 1);
+
+          if (mode === 'all') {
+            const groups = (nativeSymbolInfo as any).groups || [];
+
+            // Add source line mappings to instructions that don't have them yet
+            if (nativeSymbolIndices.length > 0) {
+              const addressToLineMap = await page.evaluate(({ nativeSymbolIndices }: any) => {
+                const state = window.getState();
+                const thread = window.selectors.selectedThread.getThread(state);
+                const { samples, stackTable, frameTable } = thread;
+                const nativeSymbolSet = new Set(nativeSymbolIndices);
+                const mapping: Record<number, number> = {};
+                for (let sampleIdx = 0; sampleIdx < samples.length; sampleIdx++) {
+                  let stackIdx = samples.stack[sampleIdx];
+                  while (stackIdx !== null) {
+                    const frameIdx = stackTable.frame[stackIdx];
+                    const frameNativeSymbol = frameTable.nativeSymbol ? frameTable.nativeSymbol[frameIdx] : null;
+                    if (frameNativeSymbol !== null && nativeSymbolSet.has(frameNativeSymbol)) {
+                      const address = frameTable.address ? frameTable.address[frameIdx] : null;
+                      const lineNumber = frameTable.line ? frameTable.line[frameIdx] : null;
+                      if (address !== null && lineNumber !== null) {
+                        mapping[address] = lineNumber;
+                      }
+                    }
+                    stackIdx = stackTable.prefix[stackIdx];
+                  }
+                }
+                return mapping;
+              }, { nativeSymbolIndices });
+
+              for (const group of groups) {
+                if (group.assemblyInstructions && group.assemblyInstructions[0]?.sourceLineNumber === undefined) {
+                  for (const inst of group.assemblyInstructions) {
+                    inst.sourceLineNumber = addressToLineMap[inst.address] || null;
+                  }
+                }
+              }
+            }
+
+            for (const group of groups) {
+              if (!group.assemblyInstructions) continue;
+
+              console.log(`\n${"═".repeat(80)}`);
+              console.log("Source and Assembly");
+              console.log(`${"═".repeat(80)}\n`);
+
+              const instructionsWithLineNumbers = group.assemblyInstructions.filter((i: any) => i.sourceLineNumber !== null);
+              const canInterleave = instructionsWithLineNumbers.length > 0;
+
+              if (!canInterleave) {
+                console.log(`Warning: No assembly-to-source line mappings found. Showing assembly only:\n`);
+              }
+
+              const maxAsmSamples = Math.max(...group.assemblyInstructions.map((i: any) => i.selfSamples || 0), 1);
+
+              const headerLine = "Line/Addr".padEnd(10);
+              console.log(`${headerLine}    Self   Total`);
+              console.log("─".repeat(80));
+
+              let lastSourceLineShown = 0;
+              let justShowedSource = false;
+
+              for (let i = 0; i < group.assemblyInstructions.length; i++) {
+                const inst = group.assemblyInstructions[i];
+
+                if (inst.sourceLineNumber !== null) {
+                  const hasSourceToShow = relevantLines.some((l: any) =>
+                    l.lineNumber > lastSourceLineShown && l.lineNumber <= inst.sourceLineNumber
+                  );
+
+                  if (hasSourceToShow) {
+                    if (!justShowedSource && lastSourceLineShown > 0) {
+                      console.log();
+                    }
+
+                    for (const line of relevantLines) {
+                      if (line.lineNumber > lastSourceLineShown && line.lineNumber <= inst.sourceLineNumber) {
+                        const lineNum = line.lineNumber.toString().padStart(10);
+                        const selfStr = line.selfSamples > 0 ? line.selfSamples.toString().padStart(7) : "       ";
+                        const totalStr = line.totalSamples > 0 ? line.totalSamples.toString().padStart(7) : "       ";
+                        const marker = line.selfSamples > 0 ? "►" : " ";
+                        const hotspotColor = getHotspotColor(line.selfSamples, maxSourceSamples, enableColor);
+                        const lineColor = hotspotColor || (enableColor ? colors.cyan : '');
+                        const coloredLine = lineColor
+                          ? `${lineColor}${lineNum}  ${selfStr}  ${totalStr}  ${marker} ${line.text}${colors.reset}`
+                          : `${lineNum}  ${selfStr}  ${totalStr}  ${marker} ${line.text}`;
+                        console.log(coloredLine);
+                        lastSourceLineShown = line.lineNumber;
+                      }
+                    }
+                    justShowedSource = true;
+                  }
+                }
+
+                const addrStr = `0x${inst.address.toString(16).padStart(8, '0')}`;
+                const selfStr = inst.selfSamples > 0 ? inst.selfSamples.toString().padStart(7) : "       ";
+                const totalStr = inst.totalSamples > 0 ? inst.totalSamples.toString().padStart(7) : "       ";
+                const marker = inst.selfSamples > 0 ? "►" : " ";
+                const hotspotColor = getHotspotColor(inst.selfSamples, maxAsmSamples, enableColor);
+                const lineColor = hotspotColor || (enableColor ? colors.gray : '');
+                const coloredLine = lineColor
+                  ? `${lineColor}${addrStr}  ${selfStr}  ${totalStr}  ${marker} ${inst.instruction}${colors.reset}`
+                  : `${addrStr}  ${selfStr}  ${totalStr}  ${marker} ${inst.instruction}`;
+                console.log(coloredLine);
+                justShowedSource = false;
+              }
+
+              const hasRemainingSource = relevantLines.some((l: any) => l.lineNumber > lastSourceLineShown);
+              if (hasRemainingSource) {
+                console.log();
+                for (const line of relevantLines) {
+                  if (line.lineNumber > lastSourceLineShown) {
+                    const lineNum = line.lineNumber.toString().padStart(10);
+                    const selfStr = line.selfSamples > 0 ? line.selfSamples.toString().padStart(7) : "       ";
+                    const totalStr = line.totalSamples > 0 ? line.totalSamples.toString().padStart(7) : "       ";
+                    const marker = line.selfSamples > 0 ? "►" : " ";
+                    const hotspotColor = getHotspotColor(line.selfSamples, maxSourceSamples, enableColor);
+                    const lineColor = hotspotColor || (enableColor ? colors.cyan : '');
+                    const coloredLine = lineColor
+                      ? `${lineColor}${lineNum}  ${selfStr}  ${totalStr}  ${marker} ${line.text}${colors.reset}`
+                      : `${lineNum}  ${selfStr}  ${totalStr}  ${marker} ${line.text}`;
+                    console.log(coloredLine);
+                  }
+                }
+              }
+
+              console.log();
+            }
+          } else {
+            // src-only mode
+            console.log(`${"line".padStart(10)}  ${"self".padStart(7)}  ${"total".padStart(7)}    source`);
+            console.log("-".repeat(80));
+
+            for (const line of relevantLines) {
+              const lineNum = line.lineNumber.toString().padStart(10);
+              const selfStr = line.selfSamples > 0 ? line.selfSamples.toString().padStart(7) : "       ";
+              const totalStr = line.totalSamples > 0 ? line.totalSamples.toString().padStart(7) : "       ";
+              const marker = line.selfSamples > 0 ? "►" : " ";
+              const hotspotColor = getHotspotColor(line.selfSamples, maxSourceSamples, enableColor);
+              const lineColor = hotspotColor || (enableColor ? colors.cyan : '');
+              const coloredLine = lineColor
+                ? `${lineColor}${lineNum}  ${selfStr}  ${totalStr}  ${marker} ${line.text}${colors.reset}`
+                : `${lineNum}  ${selfStr}  ${totalStr}  ${marker} ${line.text}`;
+              console.log(coloredLine);
+            }
+            console.log();
+          }
+
+          await page.close();
+          return;
+        } else {
+          console.log(`Source did not load: ${JSON.stringify(sourceData)}`);
+          if (jsFileName) {
+            console.log(`Could not find ${jsFileName} in ${profileDir}`);
+          }
+        }
       }
     }
   }
