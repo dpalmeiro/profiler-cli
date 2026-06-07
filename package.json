@@ -7,12 +7,19 @@
     "profiler-cli": "./dist/index.js"
   },
   "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "playwright": "^1.45.3",
     "yargs": "^17.7.1"
   },
   "scripts": {
     "build": "tsc",
+    "prepare": "npm run build",
     "start": "tsc && node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest"
